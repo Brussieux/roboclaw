@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+rcihm_client.log
+.env
