@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """
-RCIHM - RoboClaw Client Human-Machine Interface
+RCIHM - RoboClaw Client Human-Machine Interface (minimal UI)
 
-Simple, dependency-free TCP client to connect to the RoboClaw server
-(port 65432 by default), display server messages with timestamps, and
-optionally save them to a log file. Reconnects automatically if the
-connection drops.
-
-Usage:
-    python3 RCIHM.py --host 192.168.1.50 --port 65432
-
-If --host is omitted, you'll be prompted (default 127.0.0.1).
-Press Ctrl+C to exit.
+Behavior (per request):
+- Print only 'C' upon successful connection.
+- Print only '>' (no newline) whenever a new distance value is requested.
+- Suppress all other console output. Still logs to file for diagnostics.
 """
 
 import argparse
@@ -30,16 +24,15 @@ stop_event = threading.Event()
 
 
 def setup_logging(logfile: str = LOG_FILENAME) -> logging.Logger:
+    """Configure file-only logging to avoid console noise."""
     logger = logging.getLogger("RCIHM")
     logger.setLevel(logging.INFO)
 
-    # Console handler
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(ch)
+    # Remove existing handlers to prevent duplicates
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
 
-    # File handler (rotating)
+    # File handler (rotating) only
     fh = RotatingFileHandler(logfile, maxBytes=1_000_000, backupCount=3)
     fh.setLevel(logging.INFO)
     fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
@@ -53,57 +46,78 @@ def timestamp() -> str:
 
 
 def user_input_thread(logger: logging.Logger):
-    """Optional stdin watcher to allow future commands or quit.
-    Currently only supports 'q' or Ctrl+C to exit.
-    """
+    """Deprecated optional stdin watcher (kept for future use)."""
     try:
         while not stop_event.is_set():
-            line = sys.stdin.readline()
-            if not line:  # EOF
-                break
-            line = line.strip().lower()
-            if line in {"q", "quit", "exit"}:
-                logger.info("[user] Quit requested")
-                stop_event.set()
-                break
-            else:
-                logger.info(f"[user] Unknown input: {line!r} (type 'q' to quit)")
-    except Exception as e:
-        logger.info(f"[user] input error: {e}")
+            time.sleep(0.1)
+    except Exception:
         stop_event.set()
 
 
-def connect_and_stream(logger: logging.Logger, host: str, port: int):
+def connect_and_stream(logger: logging.Logger, host: str, port: int, input_enabled: bool = True):
     backoff = 2
     max_backoff = 30
 
     while not stop_event.is_set():
         try:
-            logger.info(f"Connecting to {host}:{port} ... (Ctrl+C to cancel)")
-            with socket.create_connection((host, port), timeout=10) as sock:
-                logger.info(f"[{timestamp()}] Connected to {host}:{port}")
-                # Convert to file-like object for convenient line reading
-                sock_file = sock.makefile('r', encoding='utf-8', newline='\n', errors='replace')
+            sock = socket.create_connection((host, port), timeout=10)
+            # Print 'C' on successful connection (minimal UI)
+            print("C", flush=True)
+            
+            # Remove timeout after connection is established
+            sock.settimeout(None)
+            
+            # Convert to file-like object for convenient line reading
+            sock_file = sock.makefile('r', encoding='utf-8', newline='\n', errors='replace')
 
-                # Reset backoff after successful connection
-                backoff = 2
+            # Reset backoff after successful connection
+            backoff = 2
 
-                for line in sock_file:
-                    if stop_event.is_set():
-                        break
-                    msg = line.rstrip('\r\n')
-                    logger.info(f"[{timestamp()}] {msg}")
+            for line in sock_file:
+                if stop_event.is_set():
+                    break
+                # Empty line means server disconnected
+                if not line:
+                    sock.close()
+                    return  # Exit gracefully instead of reconnecting
+                    
+                msg = line.rstrip('\r\n')
+                # Minimal protocol handling
+                # Ignore server-sent 'C' since we already printed it on connect
+                if msg == 'C':
+                    continue
+                # Position report from server -> print as-is
+                if msg.startswith('P:'):
+                    print(msg, flush=True)
+                    continue
+                # If server prompts with '>' request a distance value
+                if msg == '>':
+                    try:
+                        # Minimal prompt
+                        print(">", end="", flush=True)
+                        distance = input().strip()
+                        
+                        # If user typed 'p', request position; otherwise send distance
+                        if distance.lower() == 'p':
+                            sock.sendall(b"p\n")
+                        else:
+                            params = f"DISTANCE:{distance}\n"
+                            sock.sendall(params.encode('utf-8'))
+                    except (EOFError, KeyboardInterrupt):
+                        sock.close()
+                        return
+                    except BrokenPipeError:
+                        sock.close()
+                        return
 
-                logger.info(f"[{timestamp()}] Connection closed by server or lost")
+            sock.close()
 
         except (socket.timeout, ConnectionRefusedError, OSError) as e:
             if stop_event.is_set():
                 break
-            logger.info(f"[{timestamp()}] Connection error: {e}")
 
         # Reconnect with backoff
         if not stop_event.is_set():
-            logger.info(f"Reconnecting in {backoff}s ...")
             for _ in range(backoff):
                 if stop_event.is_set():
                     break
@@ -113,38 +127,28 @@ def connect_and_stream(logger: logging.Logger, host: str, port: int):
 
 def main():
     parser = argparse.ArgumentParser(description="RoboClaw TCP client (RCIHM)")
-    parser.add_argument("--host", help="Server host/IP (default: prompt)")
+    parser.add_argument("--host", help=f"Server host/IP (default: {DEFAULT_HOST})")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Server port (default: {DEFAULT_PORT})")
     parser.add_argument("--no-input", action="store_true", help="Disable stdin watcher thread")
     args = parser.parse_args()
 
     logger = setup_logging()
 
-    host = args.host
-    if not host:
-        try:
-            entered = input(f"Enter server host/IP [{DEFAULT_HOST}]: ").strip()
-            host = entered or DEFAULT_HOST
-        except (EOFError, KeyboardInterrupt):
-            print()
-            host = DEFAULT_HOST
+    host = args.host or DEFAULT_HOST
 
-    logger.info("========================================")
-    logger.info("RCIHM - RoboClaw Client HMI")
-    logger.info("- Connects to RoboClaw TCP server and displays messages")
-    logger.info("- Press 'q' + Enter or Ctrl+C to exit")
-    logger.info("========================================")
-
-    # Optional input watcher thread
+    # Disable input watcher thread to avoid conflicts with parameter input
+    # User can still use Ctrl+C to exit
     input_thread = None
-    if not args.no_input:
-        input_thread = threading.Thread(target=user_input_thread, args=(logger,), daemon=True)
-        input_thread.start()
+    input_enabled = not args.no_input
+    # Don't start the input thread - it conflicts with parameter input
+    # if input_enabled:
+    #     input_thread = threading.Thread(target=user_input_thread, args=(logger,), daemon=True)
+    #     input_thread.start()
 
     try:
-        connect_and_stream(logger, host, args.port)
+        connect_and_stream(logger, host, args.port, input_enabled=False)
     except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt - exiting ...")
+        pass
     finally:
         stop_event.set()
         if input_thread and input_thread.is_alive():
@@ -152,7 +156,7 @@ def main():
                 input_thread.join(timeout=1.0)
             except Exception:
                 pass
-        logger.info("RCIHM terminated.")
+        # No extra console output on exit
 
 
 if __name__ == "__main__":

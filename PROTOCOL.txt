@@ -1,0 +1,153 @@
+RoboClaw TCP Communication Protocol
+====================================
+
+Overview
+--------
+This document describes the minimal text-based protocol used between the
+RoboClaw server (roboclaw_speedacceldistance.py) and the HMI client (RCIHM.py).
+
+The protocol uses line-oriented messages (newline-terminated) over TCP port 65432.
+
+
+Server → Client Messages
+-------------------------
+
+1. Connection Acknowledgment
+   Format: C\n
+   Sent: Once, immediately after client connects
+   Meaning: Server is ready to accept commands
+   Client displays: "C"
+
+2. Input Prompt
+   Format: >\n
+   Sent: When server is ready to receive a distance value or position request
+   Meaning: Waiting for user input
+   Client displays: ">" (without newline, cursor stays on same line for input)
+
+3. Position Report
+   Format: P:<encoder1>,<encoder2>\n
+   Example: P:12345,67890\n
+   Sent: 
+     - Automatically every 200ms during motor movement
+     - On demand when client sends 'p' at a prompt
+   Meaning: Current encoder positions (M1, M2)
+   Client displays: "P:12345,67890"
+
+
+Client → Server Messages
+-------------------------
+
+1. Distance Command
+   Format: DISTANCE:<value>\n
+   Example: DISTANCE:10000\n
+   Sent: When user types a number at the ">" prompt and presses Enter
+   Meaning: Request to move motors by <value> encoder counts
+   Notes:
+     - Positive values move in one direction
+     - Negative values move in opposite direction
+     - Sign determines motor direction (speed sign is inverted relative to distance)
+
+2. Position Query
+   Format: p\n
+   Sent: When user types 'p' at the ">" prompt and presses Enter
+   Meaning: Request current encoder positions
+   Response: Server immediately sends a P:<enc1>,<enc2> message and re-prompts
+
+
+Protocol Flow
+-------------
+
+Initial Connection:
+  Server: C\n
+  Server: >\n
+  Client: DISTANCE:10000\n
+  [Motors start moving]
+
+During Movement (automatic position streaming):
+  Server: P:100,200\n         (every 200ms)
+  Server: P:500,600\n
+  Server: P:900,1100\n
+  ...
+  [Movement completes]
+  Server: >\n
+
+At Prompt (manual position query):
+  Server: >\n
+  Client: p\n
+  Server: P:10000,10000\n
+  Server: >\n
+  Client: DISTANCE:5000\n
+  [Motors start moving again]
+
+
+Special Cases
+-------------
+
+1. Watchdog Timeout
+   - If no new distance command is received before watchdog expires during movement
+   - Motors stop automatically
+   - Server sends: >\n (ready for new distance)
+
+2. Client Disconnect
+   - Server detects empty recv() and prints "Client disconnected"
+   - Server closes connection and waits for new client
+
+3. Invalid Distance Format
+   - If client sends malformed DISTANCE: command
+   - Server uses default or zero distance
+   - Movement proceeds with fallback value
+
+
+Implementation Notes
+--------------------
+
+Server Side:
+- All messages to client go through print_and_send() function
+- Only sends: 'C', '>', or messages starting with 'P:'
+- All other server logs stay local (console only)
+- Watchdog resets at start of each movement
+- Fixed parameters: accel=100, speed=300
+
+Client Side:
+- Minimal UI: displays only 'C', '>', and 'P:' lines
+- All other output suppressed (logs to file only)
+- Line-oriented reading using makefile()
+- Background logging to rcihm_client.log for diagnostics
+
+Motor Control:
+- Speed sign is opposite to distance sign for proper direction
+- M1: speed_signed = -speed when distance >= 0
+- M2: speed2_signed = +speed when distance >= 0
+- Distance always passed as absolute value to motor commands
+
+
+Safety Features
+---------------
+- Watchdog timer monitors command freshness
+- SIGINT (Ctrl+C) triggers emergency motor stop
+- Client disconnect detected and handled gracefully
+- Invalid inputs use safe defaults (zero or predefined values)
+
+
+Example Session Transcript
+---------------------------
+
+[Client connects]
+C
+>10000                          [User types 10000 + Enter]
+P:0,0
+P:234,245
+P:467,489
+P:701,734
+...
+P:9998,10001
+>p                              [User types p + Enter]
+P:10000,10000
+>-5000                          [User types -5000 + Enter]
+P:10000,10000
+P:9766,9755
+P:9533,9511
+...
+P:5001,4999
+>0                              [User types 0 + Enter - stops motion]
+>

@@ -14,19 +14,22 @@ PORT = 65432
 #Windows comport name
 #rc = Roboclaw("COM9",38400)
 #Linux comport name
-rc = Roboclaw("/dev/ttyACM1",115200)
+rc = Roboclaw("/dev/ttyACM0",115200)
 
-# Global variable for socket connection
-client_conn = None
+client_conn = None  # Global socket connection reference
 
-def print_and_send(message):
-    """Print to console and send to connected client"""
+def print_and_send(message: str):
+    """Console print always; send minimal protocol messages to client.
+    Allowed outbound messages: 'C', '>', and any line starting with 'P:'.
+    """
     print(message)
+    if not (message in ('C', '>') or message.startswith('P:')):
+        return
     if client_conn:
         try:
-            client_conn.sendall((message + "\n").encode())
-        except:
-            pass  # Ignore send errors
+            client_conn.sendall((message + "\n").encode('utf-8'))
+        except Exception:
+            pass
 
 def displayspeed():
     enc1 = rc.ReadEncM1(address)
@@ -73,54 +76,131 @@ server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server_socket.bind((HOST, PORT))
 server_socket.listen(1)
 
-print_and_send(f"\nTCP Server listening on {HOST}:{PORT}")
-print_and_send("Waiting for client connection to start motor movements...")
+print(f"\nTCP Server listening on {HOST}:{PORT}")
+print("Waiting for client connection to start motor movements...")
 
 try:
     # Wait for a client connection
     conn, addr = server_socket.accept()
     client_conn = conn  # Set global connection variable
-    print_and_send(f"Connection established from {addr}")
-    conn.sendall(b"Connected to RoboClaw controller\n")
+    print(f"Connection established from {addr}")
+    # Send only 'C' to client to signal connection established
+    print_and_send('C')
     
-    while(1):
-        print_and_send("\nStarting first movement")
-        rc.SpeedAccelDistanceM1(address,12000,12000,42000,1)
-        rc.SpeedAccelDistanceM2(address,12000,-12000,42000,1)
-        rc.SpeedAccelDistanceM1(address,12000,0,0,0)  #distance travelled is v*v/2a = 12000*12000/2*48000 = 1500
-        rc.SpeedAccelDistanceM2(address,12000,0,0,0)  #that makes the total move in one direction 48000
-        update_watchdog()  # Update command time
-        print_and_send("Watchdog timer reset")
-        
-        print_and_send("Monitoring first movement...")
-        buffers = (0,0,0)
-        while (buffers[1] != 0x80 and buffers[2] != 0x80):  # Loop until distance command has completed
-            print_and_send(f"Buffers: {buffers[1]} {buffers[2]}")
-            displayspeed()
-            time.sleep(1)  # Longer sleep to make watchdog testing easier
-            if check_watchdog():    # Check if watchdog timeout occurred
-                print_and_send("Watchdog triggered - stopping motors")
-                raise Exception("Watchdog timeout")
-            buffers = rc.ReadBuffers(address)
+    # Fixed motor parameters
+    accel = 100
+    speed = 300
 
-        print_and_send("\nStarting second movement")
-        rc.SpeedAccelDistanceM1(address,48000,-12000,46500,1)
-        rc.SpeedAccelDistanceM2(address,48000,12000,46500,1)
-        rc.SpeedAccelDistanceM1(address,48000,0,0,0)  #distance travelled is v*v/2a = 12000*12000/2*48000 = 1500
-        rc.SpeedAccelDistanceM2(address,48000,0,0,0)  #that makes the total move in one direction 48000
+    # Initial distance request prompt
+    conn.settimeout(60.0)  # 60 second timeout for parameter input
+    while True:
+        print_and_send('>')
+        data = conn.recv(1024).decode('utf-8').strip()
+        # Handle position request
+        if data.lower() == 'p':
+            enc1 = rc.ReadEncM1(address)
+            enc2 = rc.ReadEncM2(address)
+            if enc1[0] and enc2[0]:
+                print_and_send(f"P:{enc1[1]},{enc2[1]}")
+            else:
+                # If read failed, report zeros
+                print_and_send("P:0,0")
+            continue  # Re-prompt for distance
+        # Parse distance parameter
+        if data.startswith("DISTANCE:"):
+            try:
+                distance = int(data.split(":")[1])
+                print(f"Received distance: {distance}")
+                break
+            except ValueError:
+                print(f"Invalid distance value: {data.split(':')[1]}. Using default distance.")
+                distance = 42000
+                break
+        else:
+            print("Invalid format - using default distance")
+            distance = 42000
+            break
+    
+    conn.settimeout(None)  # Remove timeout for normal operation
+    
+    # Main loop - execute movements
+    while(1):
+        print("\nStarting movement")
+        # Set speed sign opposite to distance sign
+        if distance >= 0:
+            speed_signed = -speed  # M1 uses negative speed for positive distance
+            speed2_signed = speed  # M2 uses positive speed for positive distance
+        else:
+            speed_signed = speed   # M1 uses positive speed for negative distance
+            speed2_signed = -speed # M2 uses negative speed for negative distance
+
+        rc.SpeedAccelDistanceM1(address,accel,speed_signed,abs(distance),1)  # M1 speed inverted
+        rc.SpeedAccelDistanceM2(address,accel,speed2_signed,abs(distance),1)
+        rc.SpeedAccelDistanceM1(address,accel,0,0,0)  #distance travelled is v*v/2a = 12000*12000/2*48000 = 1500
+        rc.SpeedAccelDistanceM2(address,accel,0,0,0)  #that makes the total move in one direction 48000
         update_watchdog()  # Update command time
-        print_and_send("Watchdog timer reset")
-        
-        print_and_send("Monitoring second movement...")
+        print("Watchdog timer reset")
+        print("Monitoring movement...")
         buffers = (0,0,0)
+        watchdog_triggered = False
         while (buffers[1] != 0x80 and buffers[2] != 0x80):  # Loop until distance command has completed
-            print_and_send(f"Buffers: {buffers[1]} {buffers[2]}")
             displayspeed()
-            time.sleep(1)  # Longer sleep to make watchdog testing easier
+            
+            # Send position to client every loop iteration
+            enc1 = rc.ReadEncM1(address)
+            enc2 = rc.ReadEncM2(address)
+            if enc1[0] and enc2[0]:
+                print_and_send(f"P:{enc1[1]},{enc2[1]}")
+            else:
+                print_and_send("P:0,0")
+            
+            time.sleep(0.2)  # 200ms loop for faster monitoring
             if check_watchdog():    # Check if watchdog timeout occurred
                 print_and_send("Watchdog triggered - stopping motors")
-                raise Exception("Watchdog timeout")
+                watchdog_triggered = True
+                break  # Exit loop but don't raise exception
             buffers = rc.ReadBuffers(address)
+        
+        # Movement completed or watchdog triggered - wait for new distance
+        # Prompt for next distance (watchdog or normal completion)
+        conn.settimeout(60.0)  # 60 second timeout for parameter input
+        while True:
+            print_and_send('>')
+            data = conn.recv(1024).decode('utf-8').strip()
+            
+            # Check if client disconnected
+            if not data:
+                print("Client disconnected")
+                break  # Exit the inner prompt loop; outer will break below
+            
+            # Handle position request
+            if data.lower() == 'p':
+                enc1 = rc.ReadEncM1(address)
+                enc2 = rc.ReadEncM2(address)
+                if enc1[0] and enc2[0]:
+                    print_and_send(f"P:{enc1[1]},{enc2[1]}")
+                else:
+                    print_and_send("P:0,0")
+                continue  # Re-prompt without changing distance
+            
+            # Parse distance parameter
+            if data.startswith("DISTANCE:"):
+                try:
+                    distance = int(data.split(":")[1])
+                    print(f"Received distance: {distance}")
+                except ValueError:
+                    print(f"Invalid distance value: {data.split(':')[1]}. Using zero distance.")
+                    distance = 0
+                break  # Got a distance (valid or coerced) -> exit prompt loop
+            else:
+                print("Invalid format - using zero distance")
+                distance = 0
+                break
+        if not data:
+            break  # Exit the main loop on disconnect
+        
+        conn.settimeout(None)  # Remove timeout for normal operation
+        continue  # Skip to next iteration with new distance
 
 except KeyboardInterrupt:
     # This will be handled by our signal handler
