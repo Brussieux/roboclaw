@@ -4,7 +4,7 @@ RoboClaw TCP Communication Protocol
 Overview
 --------
 This document describes the minimal text-based protocol used between the
-RoboClaw server (roboclaw_speedacceldistance.py) and the HMI client (RCIHM.py).
+RoboClaw server (speedacceldistance.py) and the HMI client (RCIHM.py).
 
 The protocol uses line-oriented messages (newline-terminated) over TCP port 65432.
 
