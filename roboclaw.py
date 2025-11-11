@@ -1,5 +1,7 @@
 import random
 import time
+import signal
+import sys
 
 import serial
 
@@ -1078,3 +1080,81 @@ class Roboclaw:
         except:
             return 0
         return 1
+
+
+# Safety helpers (incorporated from roboclaw_safety.py)
+# Global variables for watchdog
+last_command_time = 0
+WATCHDOG_TIMEOUT = 10  # 10 seconds timeout (default)
+rc = None
+dev_address = None
+
+def init_safety(roboclaw, address):
+    """Initialize safety features with the given roboclaw instance"""
+    global rc, dev_address, last_command_time
+    rc = roboclaw
+    dev_address = address
+
+    # Setup signal handler for Ctrl+C
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Initialize last command time
+    last_command_time = time.time()
+
+def stop_motors():
+    """Stop all motors safely"""
+    if rc is None or dev_address is None:
+        return
+    # Stop motor 1 by setting speed to 0
+    rc.ForwardM1(dev_address, 0)
+    rc.BackwardM1(dev_address, 0)
+    # Stop motor 2 by setting speed to 0
+    rc.ForwardM2(dev_address, 0)
+    rc.BackwardM2(dev_address, 0)
+    # Short delay to ensure commands are processed
+    time.sleep(0.1)
+    print("Motors stopped")
+
+def signal_handler(sig, frame):
+    """Handle Ctrl+C gracefully"""
+    print('You pressed Ctrl+C!')
+    stop_motors()
+    sys.exit(0)
+
+def check_watchdog():
+    """Check if watchdog timeout has occurred"""
+    global last_command_time
+    if time.time() - last_command_time > WATCHDOG_TIMEOUT:
+        print("Watchdog timeout - stopping motors")
+        stop_motors()
+        return True
+    return False
+
+def update_watchdog():
+    """Update the watchdog timer"""
+    global last_command_time
+    last_command_time = time.time()
+
+def safety_wrapper(func):
+    """Decorator to add safety features to motor control functions"""
+    def wrapper(*args, **kwargs):
+        update_watchdog()  # Update watchdog before command
+        try:
+            result = func(*args, **kwargs)
+            return result
+        except Exception as e:
+            print(f"Error in motor command: {e}")
+            stop_motors()
+            raise
+    return wrapper
+
+def enableFailsafe(failsafeTime):
+    """Set the failsafe watchdog timeout in milliseconds (no return)."""
+    global WATCHDOG_TIMEOUT
+    try:
+        ms = int(failsafeTime)
+    except (TypeError, ValueError):
+        return
+    if ms <= 0:
+        ms = 1  # Clamp to minimum 1 ms
+    WATCHDOG_TIMEOUT = ms / 1000.0

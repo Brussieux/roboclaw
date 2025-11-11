@@ -4,8 +4,7 @@
 
 import time
 import socket
-from roboclaw import Roboclaw
-from roboclaw_safety import init_safety, check_watchdog, update_watchdog
+from roboclaw import Roboclaw, enableFailsafe, init_safety, check_watchdog, update_watchdog
 
 # TCP server configuration
 HOST = '0.0.0.0'  # Listen on all available interfaces
@@ -63,6 +62,7 @@ address = 0x80
 
 # Initialize safety features
 init_safety(rc, address)
+enableFailsafe(5000)  # Set failsafe watchdog to 5000 ms (5 seconds)
 
 version = rc.ReadVersion(address)
 if version[0] == False:

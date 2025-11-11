@@ -4,7 +4,31 @@ import sys
 
 # Global variables for watchdog
 last_command_time = 0
-WATCHDOG_TIMEOUT = 10  # 10 seconds timeout
+WATCHDOG_TIMEOUT = 10  # 10 seconds timeout (default)
+
+def enableFailsafe(failsafeTime: int):
+    """Enable/adjust the failsafe watchdog timeout.
+
+    Parameters:
+        failsafeTime (int): Timeout in milliseconds. When the time since the
+            last command exceeds this value, the watchdog triggers and motors
+            are stopped.
+
+    Notes:
+        - Internally, the watchdog operates in seconds; the provided
+          millisecond value is converted to seconds.
+        - Values <= 0 will set a very small timeout (1 ms) to avoid disabling
+          the failsafe by mistake.
+    """
+    global WATCHDOG_TIMEOUT
+    try:
+        ms = int(failsafeTime)
+    except (TypeError, ValueError):
+        # Keep current timeout if invalid input is provided
+        return
+    if ms <= 0:
+        ms = 1  # Clamp to 1ms minimum to keep failsafe enabled
+    WATCHDOG_TIMEOUT = ms / 1000.0
 
 def init_safety(roboclaw, address):
     """Initialize safety features with the given roboclaw instance"""

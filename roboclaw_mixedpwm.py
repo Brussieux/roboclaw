@@ -1,6 +1,6 @@
 import time
 from roboclaw import Roboclaw
-from roboclaw_safety import init_safety, check_watchdog, update_watchdog
+from roboclaw import init_safety, check_watchdog, update_watchdog
 
 #Windows comport name
 #rc = Roboclaw("COM9",115200)
